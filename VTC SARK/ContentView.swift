@@ -18,22 +18,31 @@ struct ContentView: View {
     @State private var shareURL: URL?
     @State private var showingQRScanner = false
     @State private var scannedParticipant: Int16? = nil
-    @State private var idealBaseTimes: [Int16: Date] = [:]
+    //@State private var idealBaseTimes: [Int16: Date] = [:]
     @State private var showingBaseTimePicker = false
     @State private var baseTime: Date? = nil
+    @State private var showDeleteConfirm = false
 
-        // Default if no base time saved: current hour, 0 minutes
-        private var defaultBaseTime: Date {
-            let now = Date()
-            let calendar = Calendar.current
-            let hour = calendar.component(.hour, from: now)
-            return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: now) ?? now
-        }
 
-        // The effective base time for participant 0
-        private var effectiveBaseTime: Date {
-            baseTime ?? defaultBaseTime
-        }
+    // Default if no base time saved: current hour, 0 minutes
+    private var defaultBaseTime: Date {
+        let now = Date()
+        let calendar = Calendar.current
+        let hour = calendar.component(.hour, from: now)
+        return calendar.date(bySettingHour: hour, minute: 0, second: 0, of: now) ?? now
+    }
+
+    // The effective base time for participant 0
+    private var effectiveBaseTime: Date {
+        baseTime ?? defaultBaseTime
+    }
+    
+    // NEW: text for showing the base time in the header
+    private var baseTimeText: String {
+        let df = DateFormatter()
+        df.dateFormat = "dd-MM-yyyy HH:mm"
+        return df.string(from: effectiveBaseTime)
+    }
 
     var body: some View {
         NavigationView {
@@ -48,19 +57,49 @@ struct ContentView: View {
                     }
                 }
                 .padding()
+                
+                // NEW: Base time row, tap to edit
+                Button(action: {
+                    // Ensure we have the latest base time loaded for this VTC
+                    loadBaseTime()
+                    showingBaseTimePicker = true
+                }) {
+                    HStack {
+                        Text("Basistijd VTC \(selectedCheckpoint):")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Text(baseTimeText)
+                            .font(.body)
+                            .bold()
+                    }
+                    .padding(.horizontal)
+                    .padding(.bottom, 4)
+                }
+                .buttonStyle(.plain)
 
                 // List of participants 1–100 for the selected checkpoint
                 //CheckpointListView(checkpoint: selectedCheckpoint)
                 // List of participants 1–100 for the selected checkpoint
+//                CheckpointListView(
+//                    checkpoint: selectedCheckpoint,
+//                    idealBase: idealBaseTimes[selectedCheckpoint] ?? defaultBaseTime,
+//                    isFinish: selectedCheckpoint == 20
+//                )
+                
+                // List of participants 1–100 for the selected checkpoint
                 CheckpointListView(
                     checkpoint: selectedCheckpoint,
-                    idealBase: idealBaseTimes[selectedCheckpoint] ?? defaultBaseTime,
+                    idealBase: effectiveBaseTime,          // CHANGED
                     isFinish: selectedCheckpoint == 20
                 )
             }
             .navigationTitle("Equipes")
             .toolbar {
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
+                                    Button(action: { showDeleteConfirm = true }) {
+                                                Image(systemName: "trash")
+                                            }
                                     Button(action: exportCSV) {
                                         Image(systemName: "square.and.arrow.up")
                                     }
@@ -87,13 +126,30 @@ struct ContentView: View {
             }
             .sheet(isPresented: $showingBaseTimePicker) {
                 BaseTimePicker(
-                    baseTime: idealBaseTimes[selectedCheckpoint] ?? defaultBaseTime,
+                    baseTime: baseTime ?? defaultBaseTime,
                     onSave: { newBase in
-                        idealBaseTimes[selectedCheckpoint] = newBase
+                        baseTime = newBase
+                        saveBaseTime(newBase)    // persist as participant 0 for this VTC
                         showingBaseTimePicker = false
                     },
-                    onCancel: { showingBaseTimePicker = false }
+                    onCancel: {
+                        showingBaseTimePicker = false
+                    }
                 )
+            }
+            .onAppear{
+                loadBaseTime()
+            }
+            .onChange(of: selectedCheckpoint) { _ in
+                loadBaseTime()
+            }
+            .alert("VTC \(selectedCheckpoint) wissen?", isPresented: $showDeleteConfirm) {
+                Button("Verwijderen", role: .destructive) {
+                    deleteCurrentCheckpointData()
+                }
+                Button("Annuleren", role: .cancel) { }
+            } message: {
+                Text("Alle tijden voor deze VTC worden verwijderd en kunnen niet worden hersteld.")
             }
         }
     }
@@ -128,6 +184,24 @@ struct ContentView: View {
             try viewContext.save()
         } catch {
             print("Failed to save base time: \(error)")
+        }
+    }
+    
+    private func deleteCurrentCheckpointData() {
+        let request: NSFetchRequest<ParticipantTime> = ParticipantTime.fetchRequest()
+        request.predicate = NSPredicate(format: "checkpoint_id == %d", selectedCheckpoint)
+
+        do {
+            let entries = try viewContext.fetch(request)
+            for entry in entries {
+                viewContext.delete(entry)
+            }
+            try viewContext.save()
+
+            // Clear base time for this VTC so UI falls back to default
+            baseTime = nil
+        } catch {
+            print("Failed to delete checkpoint data:", error)
         }
     }
     
@@ -174,11 +248,11 @@ struct ContentView: View {
    }
     
     // Present the CheckInView for a given participant
-        private func presentCheckIn(for participantID: Int16) {
-            let checkInView = CheckInView(
+    private func presentCheckIn(for participantID: Int16) {
+        let checkInView = CheckInView(
                 participantID: participantID,
                 checkpoint: selectedCheckpoint,
-                idealBase: idealBaseTimes[selectedCheckpoint] ?? Date(),
+                idealBase: effectiveBaseTime,          // CHANGED
                 isFinish: selectedCheckpoint == 20
             )
             .environment(\.managedObjectContext, viewContext)
@@ -188,7 +262,7 @@ struct ContentView: View {
                let root = scene.windows.first(where: { $0.isKeyWindow })?.rootViewController {
                 root.present(hostingVC, animated: true)
             }
-        }
+    }
     
 }
 
@@ -262,6 +336,7 @@ struct CheckpointListView: View {
                     Image(systemName: "xmark.circle.fill").foregroundColor(.red)
                 }
             }
+            .padding(.vertical, 8)           // ⬅️ top & bottom padding per row
             .contentShape(Rectangle())
             .onTapGesture { showCheckIn(for: pid) }
         }
@@ -322,21 +397,56 @@ struct CheckInView: View {
     @State private var currentBaseTime: Date = Date()
     @State private var checkInTime: Date = Date()
     
-    private var minTime: Date {
-        Date().addingTimeInterval(-120)
-    }
-    private var maxTime: Date {
-        .distantFuture
+    // Limit past selection to "now floored to minute - 1 minute" for normal participants
+    private var dateRange: ClosedRange<Date> {
+        // For base (participant 0), no restriction
+        if participantID == 0 {
+            return Date.distantPast...Date.distantFuture
+        }
+        
+        let calendar = Calendar.current
+        let now = Date()
+        
+        // Floor "now" to the minute (e.g. 22:51:37 -> 22:51:00)
+        let components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: now)
+        guard let flooredNow = calendar.date(from: components),
+              let oneMinuteAgo = calendar.date(byAdding: .minute, value: -1, to: flooredNow) else {
+            // Fallback: no restriction if something goes wrong
+            return Date.distantPast...Date.distantFuture
+        }
+        
+        // Earliest allowed: one minute before the current minute
+        // e.g. now 22:51 → min = 22:50
+        return oneMinuteAgo...Date.distantFuture
     }
     
-    private var dateRange: ClosedRange<Date> {
-        if participantID == 0 {
-            // no restrictions
-            return Date.distantPast...Date.distantFuture
-        } else {
-            return minTime...maxTime
-        }
+    // Informational window around the ideal time
+    private var minTime: Date {
+        // 30 minutes before the ideal time
+        Calendar.current.date(
+            byAdding: .minute,
+            value: -15,
+            to: idealTime()
+        ) ?? idealTime()
     }
+
+    private var maxTime: Date {
+        // 30 minutes after the ideal time  ✅
+        Calendar.current.date(
+            byAdding: .minute,
+            value: 30,
+            to: idealTime()
+        ) ?? idealTime()
+    }
+    
+//    private var dateRange: ClosedRange<Date> {
+//        if participantID == 0 {
+//            // no restrictions
+//            return Date.distantPast...Date.distantFuture
+//        } else {
+//            return minTime...maxTime
+//        }
+//    }
 
     var body: some View {
         NavigationView {
@@ -387,7 +497,7 @@ struct CheckInView: View {
                     // Latest
                     Label {
                         HStack(alignment: .center, spacing: 4) {
-                            Text("Latest:")
+                            Text("Last:")
                                 .font(.subheadline).bold()
                             Spacer()
                             Text(timeFormatted(maxTime))
@@ -456,8 +566,8 @@ struct CheckInView: View {
         // 1) First: figure out your base time (the “0th” entry) exactly as before
         let baseReq: NSFetchRequest<ParticipantTime> = ParticipantTime.fetchRequest()
         baseReq.predicate = NSPredicate(
-          format: "participant_id == 0 AND checkpoint_id == %d",
-          checkpoint
+            format: "participant_id == 0 AND checkpoint_id == %d",
+            checkpoint
         )
         baseReq.fetchLimit = 1
 
@@ -475,22 +585,23 @@ struct CheckInView: View {
         // 2) Now try to load the *last saved* check-in for this participant
         let savedReq: NSFetchRequest<ParticipantTime> = ParticipantTime.fetchRequest()
         savedReq.predicate = NSPredicate(
-          format: "participant_id == %d AND checkpoint_id == %d",
-          participantID, checkpoint
+            format: "participant_id == %d AND checkpoint_id == %d",
+            participantID, checkpoint
         )
         savedReq.fetchLimit = 1
 
         do {
             if let saved = try viewContext.fetch(savedReq).first,
                let savedTs = saved.timestamp {
-                // if we have a saved timestamp, show that
+                // If we have a saved timestamp, show that
                 checkInTime = savedTs
             } else {
-                // otherwise fall back to your idealTime()
-                checkInTime = idealTime()
+                // Otherwise default to *now*
+                checkInTime = Date()
             }
         } catch {
-            checkInTime = idealTime()
+            // On any error, also default to *now*
+            checkInTime = Date()
         }
     }
 
@@ -589,8 +700,7 @@ struct QRCodeScannerView: UIViewControllerRepresentable {
 // Shared date formatter
 private var itemFormatter: DateFormatter {
     let formatter = DateFormatter()
-    formatter.dateStyle = .short
-    formatter.timeStyle = .medium
+    formatter.dateFormat = "HH:mm"
     return formatter
 }
 
